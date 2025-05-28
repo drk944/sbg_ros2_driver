@@ -9,9 +9,33 @@ using sbg::MessagePublisher;
 //- Constructor                                                       -//
 //---------------------------------------------------------------------//
 
-MessagePublisher::MessagePublisher():
-max_messages_(10)
+MessagePublisher::MessagePublisher()
+: max_messages_(10),
+  io_context_(),
+  serial_port_(io_context_),
+  nmea_serial_port_path_(""),
+  nmea_serial_publish_(false)
 {
+  // Initialize serial port path and serial publish flag from parameters if the node is available
+  if (rclcpp::ok()) {
+    auto node = rclcpp::Node::make_shared("sbg_driver_serial_port_config"); // Temporary node for parameter access
+    node->declare_parameter("nmea.serial_port", "");
+    node->declare_parameter("nmea.serial_publish", false); // Declare the new parameter
+
+    nmea_serial_port_path_ = node->get_parameter("nmea.serial_port").as_string();
+    nmea_serial_publish_ = node->get_parameter("nmea.serial_publish").as_bool();
+
+    if (nmea_serial_publish_ && !nmea_serial_port_path_.empty()) {
+      openSerialPort();
+    }
+  } else {
+    RCLCPP_WARN(rclcpp::get_logger("sbg_driver"), "ROS not initialized, cannot access parameters for serial port.");
+  }
+}
+
+MessagePublisher::~MessagePublisher()
+{
+  closeSerialPort();
 }
 
 //---------------------------------------------------------------------//
@@ -449,6 +473,62 @@ void MessagePublisher::publishUtcData(const SbgEComLogUnion &ref_sbg_log)
   }
 }
 
+bool MessagePublisher::openSerialPort()
+{
+  if (nmea_serial_port_path_.empty()) {
+    RCLCPP_WARN(rclcpp::get_logger("sbg_driver"), "NMEA serial port path is not set.");
+    return false;
+  }
+
+  try {
+    serial_port_.open(nmea_serial_port_path_);
+    if (serial_port_.is_open()) {
+      // Configure serial port (you might want to make these parameters as well)
+      serial_port_.set_option(boost::asio::serial_port::baud_rate(115200)); // Example baud rate
+      serial_port_.set_option(boost::asio::serial_port::parity(boost::asio::serial_port::parity::none));
+      serial_port_.set_option(boost::asio::serial_port::stop_bits(boost::asio::serial_port::stop_bits::one));
+      serial_port_.set_option(boost::asio::serial_port::flow_control(boost::asio::serial_port::flow_control::none));
+      RCLCPP_INFO(rclcpp::get_logger("sbg_driver"), "Opened NMEA serial port: %s", nmea_serial_port_path_.c_str());
+      return true;
+    } else {
+      RCLCPP_ERROR(rclcpp::get_logger("sbg_driver"), "Failed to open NMEA serial port: %s", nmea_serial_port_path_.c_str());
+      return false;
+    }
+  } catch (const boost::system::system_error& error) {
+    RCLCPP_ERROR(rclcpp::get_logger("sbg_driver"), "Error opening NMEA serial port %s: %s", nmea_serial_port_path_.c_str(), error.what());
+    return false;
+  }
+}
+
+void MessagePublisher::closeSerialPort()
+{
+  if (serial_port_.is_open()) {
+    boost::system::error_code ec;
+    serial_port_.close(ec);
+    if (ec) {
+      RCLCPP_ERROR(rclcpp::get_logger("sbg_driver"), "Error closing NMEA serial port: %s", static_cast<const char*>(ec.message().c_str()));
+    } else {
+      RCLCPP_INFO(rclcpp::get_logger("sbg_driver"), "Closed NMEA serial port: %s", nmea_serial_port_path_.c_str());
+    }
+  }
+}
+
+bool MessagePublisher::writeToSerialPort(const std::string& data)
+{
+  if (!serial_port_.is_open()) {
+    RCLCPP_WARN(rclcpp::get_logger("sbg_driver"), "NMEA serial port is not open, cannot write data.");
+    return false;
+  }
+
+  boost::system::error_code ec;
+  boost::asio::write(serial_port_, boost::asio::buffer(data), ec);
+  if (ec) {
+    RCLCPP_ERROR(rclcpp::get_logger("sbg_driver"), "Error writing to NMEA serial port %s: %s", ec.message().c_str(), ec.message().c_str());
+    return false;
+  }
+  return true;
+}
+
 void MessagePublisher::publishGpsPosData(const SbgEComLogUnion &ref_sbg_log, SbgEComMsgId sbg_msg_id)
 {
   sbg_driver::msg::SbgGpsPos sbg_gps_pos_message;
@@ -463,14 +543,29 @@ void MessagePublisher::publishGpsPosData(const SbgEComLogUnion &ref_sbg_log, Sbg
   {
     nav_sat_fix_pub_->publish(message_wrapper_.createRosNavSatFixMessage(sbg_gps_pos_message));
   }
-  if (nmea_gga_pub_ && sbg_msg_id == SBG_ECOM_LOG_GPS1_POS)
+  if (sbg_msg_id == SBG_ECOM_LOG_GPS1_POS)
   {
     const nmea_msgs::msg::Sentence  nmea_gga_msg = message_wrapper_.createNmeaGGAMessageForNtrip(ref_sbg_log.gpsPosData);
 
-    // Only publish if a valid NMEA GGA message has been generated
-    if (nmea_gga_msg.sentence.size() > 0)
+    // Only process if a valid NMEA GGA message has been generated
+    if (!nmea_gga_msg.sentence.empty())
     {
-      nmea_gga_pub_->publish(nmea_gga_msg);
+      // Publish to serial port if configured and enabled
+      if (nmea_serial_publish_ && !nmea_serial_port_path_.empty() && serial_port_.is_open()) {
+        writeToSerialPort(nmea_gga_msg.sentence);
+      } else if (nmea_serial_publish_ && !nmea_serial_port_path_.empty() && !serial_port_.is_open()) {
+        RCLCPP_WARN(rclcpp::get_logger("sbg_driver"), "NMEA serial publishing is enabled, but the serial port is not open.");
+      } else if (nmea_serial_publish_ && nmea_serial_port_path_.empty()) {
+        RCLCPP_WARN(rclcpp::get_logger("sbg_driver"), "NMEA serial publishing is enabled, but the serial port path is not set.");
+      } else {
+        RCLCPP_DEBUG(rclcpp::get_logger("sbg_driver"), "NMEA serial publishing is disabled or not configured.");
+      }
+
+      // Publish as ROS 2 message if the publisher is available
+      if (nmea_gga_pub_)
+      {
+        nmea_gga_pub_->publish(nmea_gga_msg);
+      }
     }
   }
 }
@@ -503,9 +598,41 @@ void MessagePublisher::initPublishers(rclcpp::Node& ref_ros_node_handle, const C
     initPublisher(ref_ros_node_handle, ref_output.message_id, ref_output.output_mode, getOutputTopicName(ref_output.message_id));
   }
 
-  if (ref_config_store.shouldPublishNmea())
+  // Configure NMEA GGA publisher based on the 'nmea' section
+  if (ref_config_store.shouldPublishNmea()) // We might need to adjust this logic based on the new parameters
   {
-    nmea_gga_pub_ = ref_ros_node_handle.create_publisher<nmea_msgs::msg::Sentence>(ref_config_store.getNmeaFullTopic(), max_messages_);
+    bool publish_nmea;
+    std::string nmea_topic_name;
+    std::string nmea_namespace;
+
+    // Get parameters from the 'nmea' namespace
+    ref_ros_node_handle.get_parameter("nmea.publish", publish_nmea);
+    ref_ros_node_handle.get_parameter("nmea.topic_name", nmea_topic_name);
+    ref_ros_node_handle.get_parameter("nmea.namespace", nmea_namespace);
+
+    if (publish_nmea)
+    {
+      std::string full_nmea_topic = "";
+      if (!nmea_namespace.empty())
+      {
+        full_nmea_topic = nmea_namespace + "/" + nmea_topic_name;
+      }
+      else
+      {
+        full_nmea_topic = nmea_topic_name;
+      }
+      nmea_gga_pub_ = ref_ros_node_handle.create_publisher<nmea_msgs::msg::Sentence>(full_nmea_topic, max_messages_);
+      RCLCPP_INFO(ref_ros_node_handle.get_logger(), "Publishing NMEA GGA messages to topic: %s", full_nmea_topic.c_str());
+    }
+    else
+    {
+      nmea_gga_pub_.reset();
+      RCLCPP_INFO(ref_ros_node_handle.get_logger(), "NMEA GGA publishing is disabled via configuration.");
+    }
+  }
+  else
+  {
+    nmea_gga_pub_.reset();
   }
 
   if (ref_config_store.checkRosStandardMessages())

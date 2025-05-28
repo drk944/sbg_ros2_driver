@@ -382,6 +382,9 @@ Configuration example to use an absolute and accurate time reference to UNIX epo
 # Time reference:
 time_reference: "ins_unix"
 ```
+### Forward NMEA String over serial (for time sync)
+**TODO**
+Update this with instructions on how to do my changes and why it's necessary.
 
 ## Frame parameters & conventions
 ### Frame ID

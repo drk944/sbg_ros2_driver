@@ -36,6 +36,9 @@
 #include <config_store.h>
 #include <message_wrapper.h>
 
+// Boost ASIO for serial port communication
+#include <boost/asio.hpp>
+
 namespace sbg
 {
 /*!
@@ -90,6 +93,16 @@ private:
   MessageWrapper                                                                        message_wrapper_;
   uint32_t                                                                              max_messages_;
   std::string                                                                           frame_id_;
+
+  // Boost ASIO objects for serial port
+  boost::asio::io_context                                                               io_context_;
+  boost::asio::serial_port                                                              serial_port_;
+  std::string                                                                           nmea_serial_port_path_;
+  bool                                                                                  nmea_serial_publish_;
+
+  // ROS 2 parameter for serial port path
+  // rclcpp::Parameter<std::string>                                                        nmea_port_param_; 
+
 
   //---------------------------------------------------------------------//
   //- Private methods                                                   -//
@@ -179,6 +192,24 @@ private:
    */
   void publishGpsPosData(const SbgEComLogUnion &ref_sbg_log, SbgEComMsgId sbg_msg_id);
 
+  /*!
+   * Opens the serial port.
+   * \return True if the port was opened successfully, false otherwise.
+   */
+  bool openSerialPort();
+
+  /*!
+   * Closes the serial port.
+   */
+  void closeSerialPort();
+
+  /*!
+   * Writes data to the serial port.
+   * \param[in] data The string to write.
+   * \return True if the data was written successfully, false otherwise.
+   */
+  bool writeToSerialPort(const std::string& data);
+
 public:
 
   //---------------------------------------------------------------------//
@@ -189,6 +220,12 @@ public:
    * Default constructor.
    */
   MessagePublisher();
+
+
+  /*!
+   * Destructor.
+   */
+  ~MessagePublisher(); // Explicit declaration
 
   //---------------------------------------------------------------------//
   //- Operations                                                        -//
